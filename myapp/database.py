@@ -2,9 +2,7 @@ from flask_sqlalchemy import SQLAlchemy
 from datetime import datetime
 from passlib.hash import pbkdf2_sha256
 
-
 db = SQLAlchemy()
-
 
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -24,7 +22,9 @@ class Chat(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     user = db.relationship('User', backref=db.backref('chats', lazy=True))
-    chat_list = db.Column(db.JSON, nullable=False, default=list)
+    
+    # Use a callable to produce a new empty list by default
+    chat_list = db.Column(db.JSON, nullable=False, default=lambda: [])
 
     def save_to_db(self):
         db.session.add(self)
@@ -34,8 +34,12 @@ class Chat(db.Model):
 class Message(db.Model):
     __tablename__ = 'messages'
     id = db.Column(db.Integer, primary_key=True)
+    
+    # room_id should be unique and not nullable
     room_id = db.Column(db.String(50), nullable=False, unique=True)
-    messages = db.relationship('ChatMessage', backref='message', lazy=True)
+    
+    # Relationship to all ChatMessage instances for this room
+    messages = db.relationship('ChatMessage', backref='message', lazy=True, cascade="all, delete-orphan")
 
     def save_to_db(self):
         db.session.add(self)
@@ -44,11 +48,15 @@ class Message(db.Model):
 
 class ChatMessage(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    content = db.Column(db.String(400))
-    # timestamp = db.Column(db.TIMESTAMP, server_default=0db.func.current_timestamp(), nullable=False)
-    timestamp = db.Column(db.String(20), nullable=False)
+    content = db.Column(db.String(400), nullable=False)
+    
+    # DateTime for timestamp, default to current time
+    timestamp = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    
     sender_id = db.Column(db.Integer, nullable=False)
     sender_username = db.Column(db.String(50), nullable=False)
+    
+    # Foreign key points to messages.room_id
     room_id = db.Column(db.String(50), db.ForeignKey('messages.room_id'), nullable=False)
 
     def save_to_db(self):

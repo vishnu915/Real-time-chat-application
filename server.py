@@ -11,34 +11,40 @@ app, socket = create_app()
 @socket.on("join-chat")
 def join_private_chat(data):
     room = data["rid"]
-    join_room(room=room)
+    join_room(room)
     socket.emit(
         "joined-chat",
         {"msg": f"{room} is now online."},
         room=room,
-        # include_self=False,
+        # include_self=False,  # Uncomment if you want to exclude sender
     )
 
 
-# Outgoing event handler
+# Outgoing message event handler
 @socket.on("outgoing")
 def chatting_event(json, methods=["GET", "POST"]):
     """
-    handles saving messages and sending messages to all clients
-    :param json: json
-    :param methods: POST GET
-    :return: None
+    Handles saving messages and sending messages to all clients in the room.
     """
-    room_id = json["rid"]
-    timestamp = json["timestamp"]
-    message = json["message"]
-    sender_id = json["sender_id"]
-    sender_username = json["sender_username"]
+    room_id = json.get("rid")
+    timestamp = json.get("timestamp")
+    message = json.get("message")
+    sender_id = json.get("sender_id")
+    sender_username = json.get("sender_username")
 
-    # Get the message entry for the chat room
+    if not all([room_id, timestamp, message, sender_id, sender_username]):
+        # Missing data; you can handle this more gracefully
+        print("Missing fields in incoming message")
+        return
+
+    # Get the message entry for the chat room, or create if not exists
     message_entry = Message.query.filter_by(room_id=room_id).first()
+    if not message_entry:
+        message_entry = Message(room_id=room_id)
+        db.session.add(message_entry)
+        db.session.commit()
 
-    # Add the new message to the conversation
+    # Create new ChatMessage object
     chat_message = ChatMessage(
         content=message,
         timestamp=timestamp,
@@ -46,19 +52,20 @@ def chatting_event(json, methods=["GET", "POST"]):
         sender_username=sender_username,
         room_id=room_id,
     )
-    # Add the new chat message to the messages relationship of the message
+
+    # Add new message to the conversation
     message_entry.messages.append(chat_message)
 
-    # Updated the database with the new message
+    # Save changes to the database
     try:
-        chat_message.save_to_db()
-        message_entry.save_to_db()
+        db.session.add(chat_message)
+        db.session.commit()
     except Exception as e:
-        # Handle the database error, e.g., log the error or send an error response to the client.
         print(f"Error saving message to the database: {str(e)}")
         db.session.rollback()
+        return
 
-    # Emit the message(s) sent to other users in the room
+    # Emit the message to all clients in the room except the sender
     socket.emit(
         "message",
         json,

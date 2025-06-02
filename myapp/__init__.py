@@ -7,7 +7,6 @@ from myapp.database import db
 socket = SocketIO()
 cors = CORS()
 
-
 def create_app():
     app = Flask(__name__)
     app.config.from_object(Config)
@@ -25,4 +24,4 @@ def create_app():
         from .views import views
         app.register_blueprint(views)
 
-        return app, socket
+    return app, socket
