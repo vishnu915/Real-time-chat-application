@@ -1,51 +1,64 @@
 from flask import Blueprint, render_template, request, url_for, redirect, session, flash, jsonify
-from myapp.database import db, User, Chat, Message, ChatMessage
+from myapp.database import *
 from functools import wraps
-from datetime import datetime
-from myapp import socket
 
 import pandas as pd
 import matplotlib.pyplot as plt
-import base64
-from io import BytesIO
+from myapp import socket
 
 views = Blueprint('views', __name__, static_folder='static', template_folder='templates')
 
 
-# ------------------ AUTHENTICATION DECORATOR ------------------
+# Login decorator to ensure user is logged in before accessing certain routes
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         if "user" not in session:
             return redirect(url_for("views.login"))
         return f(*args, **kwargs)
+
     return decorated
 
 
-# ------------------ INDEX ------------------
+# Index route, this route redirects to login/register page
 @views.route("/", methods=["GET", "POST"])
 def index():
+    """
+    Redirects to the login/register page.
+
+    Returns:
+        Response: Flask response object.
+    """
     return redirect(url_for("views.login"))
 
 
-# ------------------ REGISTER ------------------
+# Register a new user and hash password
 @views.route("/register", methods=["GET", "POST"])
 def register():
+    """
+    Handles user registration and password hashing.
+
+    Returns:
+        Response: Flask response object.
+    """
     if request.method == "POST":
         email = request.form["email"].strip().lower()
         username = request.form["username"].strip().lower()
         password = request.form["password"]
 
+        # Check if the user already exists
         existing_user = User.query.filter_by(username=username).first()
         if existing_user:
             flash("User already exists with that username.")
             return redirect(url_for("views.login"))
 
-        new_user = User(username=username, email=email)
+        # Create a new user
+        new_user = User(username=username, email=email, password=password)
         new_user.set_password(password)
         db.session.add(new_user)
         db.session.commit()
 
+        # Create a new chat list for the newly registered user
         new_chat = Chat(user_id=new_user.id, chat_list=[])
         db.session.add(new_chat)
         db.session.commit()
@@ -56,15 +69,23 @@ def register():
     return render_template("auth.html")
 
 
-# ------------------ LOGIN ------------------
 @views.route("/login", methods=["GET", "POST"])
 def login():
+    """
+    Handles user login and session creation.
+
+    Returns:
+        Response: Flask response object.
+    """
     if request.method == "POST":
         email = request.form["email"].strip().lower()
         password = request.form["password"]
 
+        # Query the database for the inputted email address
         user = User.query.filter_by(email=email).first()
+
         if user and user.check_password(password):
+            # Create a new session for the newly logged-in user
             session["user"] = {
                 "id": user.id,
                 "username": user.username,
@@ -78,155 +99,174 @@ def login():
     return render_template("auth.html")
 
 
-# ------------------ NEW CHAT ------------------
 @views.route("/new-chat", methods=["POST"])
 @login_required
 def new_chat():
+    """
+    Creates a new chat room and adds users to the chat list.
+
+    Returns:
+        Response: Flask response object.
+    """
     user_id = session["user"]["id"]
     new_chat_email = request.form["email"].strip().lower()
 
+    # If user is trying to add themselves, do nothing
     if new_chat_email == session["user"]["email"]:
         return redirect(url_for("views.chat"))
 
+    # Check if the recipient user exists
     recipient_user = User.query.filter_by(email=new_chat_email).first()
     if not recipient_user:
         return redirect(url_for("views.chat"))
 
+    # Check if the chat already exists
     existing_chat = Chat.query.filter_by(user_id=user_id).first()
+    """if not existing_chat:
+        existing_chat = Chat(user_id=user_id, chat_list=[])
+        db.session.add(existing_chat)
+        db.session.commit()"""
 
-    if recipient_user.id not in [c["user_id"] for c in existing_chat.chat_list]:
-        # Create a unique room_id based on user ids (ensure uniqueness)
-        room_id = str(min(user_id, recipient_user.id)) + '_' + str(max(user_id, recipient_user.id))
+    # Check if the new chat is already in the chat list
+    if recipient_user.id not in [user_chat["user_id"] for user_chat in existing_chat.chat_list]:
+        # Generate a room_id (you may use your logic to generate it)
+        room_id = str(int(recipient_user.id) + int(user_id))[-4:]
 
-        existing_chat.chat_list.append({"user_id": recipient_user.id, "room_id": room_id})
+        # Add the new chat to the chat list of the current user
+        updated_chat_list = existing_chat.chat_list + [{"user_id": recipient_user.id, "room_id": room_id}]
+        existing_chat.chat_list = updated_chat_list
+
+        # Save the changes to the database
         existing_chat.save_to_db()
 
+        # Create a new chat list for the recipient user if it doesn't exist
         recipient_chat = Chat.query.filter_by(user_id=recipient_user.id).first()
         if not recipient_chat:
             recipient_chat = Chat(user_id=recipient_user.id, chat_list=[])
             db.session.add(recipient_chat)
             db.session.commit()
 
-        recipient_chat.chat_list.append({"user_id": user_id, "room_id": room_id})
+        # Add the new chat to the chat list of the recipient user
+        updated_chat_list = recipient_chat.chat_list + [{"user_id": user_id, "room_id": room_id}]
+        recipient_chat.chat_list = updated_chat_list
         recipient_chat.save_to_db()
 
-        # Create Message room if doesn't exist
-        if not Message.query.filter_by(room_id=room_id).first():
-            new_message = Message(room_id=room_id)
-            db.session.add(new_message)
-            db.session.commit()
+        # Create a new message entry for the chat room
+        new_message = Message(room_id=room_id)
+        db.session.add(new_message)
+        db.session.commit()
 
     return redirect(url_for("views.chat"))
 
 
-# ------------------ CHAT ------------------
 @views.route("/chat/", methods=["GET", "POST"])
 @login_required
 def chat():
-    room_id = request.args.get("rid", None)
-    current_user_id = session["user"]["id"]
+    """
+    Renders the chat interface and displays chat messages.
 
+    Returns:
+        Response: Flask response object.
+    """
+    # Get the room id in the URL or set to None
+    room_id = request.args.get("rid", None)
+
+    # Get the chat list for the user
+    current_user_id = session["user"]["id"]
     current_user_chats = Chat.query.filter_by(user_id=current_user_id).first()
     chat_list = current_user_chats.chat_list if current_user_chats else []
 
+    # Initialize context that contains information about the chat room
     data = []
+
     for chat in chat_list:
-        user = User.query.get(chat["user_id"])
-        username = user.username if user else "Unknown"
+        # Query the database to get the username of users in a user's chat list
+        username = User.query.get(chat["user_id"]).username
         is_active = room_id == chat["room_id"]
-        
-        message = Message.query.filter_by(room_id=chat["room_id"]).first()
-        last_message = (
-            message.messages[-1].content if message and message.messages else "This place is empty."
-        )
+
+        try:
+            # Get the Message object for the chat room
+            message = Message.query.filter_by(room_id=chat["room_id"]).first()
+
+            # Get the last ChatMessage object in the Message's messages relationship
+            last_message = message.messages[-1]
+
+            # Get the message content of the last ChatMessage object
+            last_message_content = last_message.content
+        except (AttributeError, IndexError):
+            # Set variable to this when no messages have been sent to the room
+            last_message_content = "This place is empty. No messages ..."
 
         data.append({
             "username": username,
             "room_id": chat["room_id"],
             "is_active": is_active,
-            "last_message": last_message,
+            "last_message": last_message_content,
         })
 
-    # Safely get messages for current room
-    room_message = Message.query.filter_by(room_id=room_id).first() if room_id else None
-    messages = room_message.messages if room_message else []
+    # Get all the message history in a certain room
+    messages = Message.query.filter_by(room_id=room_id).first().messages if room_id else []
 
-    return render_template("chat.html",
-                           user_data=session["user"],
-                           room_id=room_id,
-                           data=data,
-                           messages=messages)
+    return render_template(
+        "chat.html",
+        user_data=session["user"],
+        room_id=room_id,
+        data=data,
+        messages=messages,
+    )
 
 
-# ------------------ TIME FILTER ------------------
+# Custom time filter to be used in the jinja template
 @views.app_template_filter("ftime")
 def ftime(date):
     dt = datetime.fromtimestamp(int(date))
-    return dt.strftime("%I:%M %p | %m/%d")
+    time_format = "%I:%M %p"  # Use  %I for 12-hour clock format and %p for AM/PM
+    formatted_time = dt.strftime(time_format)
+
+    formatted_time += " | " + dt.strftime("%m/%d")
+    return formatted_time
 
 
-# ------------------ VISUALIZATION (OPTIONAL) ------------------
 @views.route('/visualize')
 def visualize():
-    users = User.query.all()
-    if not users:
-        flash("No users found.")
-        return redirect(url_for("views.chat"))
+    """
+    TODO: Utilize pandas and matplotlib to analyze the number of users registered to the app.
+    Create a chart of the analysis and convert it to base64 encoding for display in the template.
 
-    dates = [user.date.strftime('%Y-%m-%d') for user in users]
-    df = pd.DataFrame(dates, columns=['date'])
-    df['date'] = pd.to_datetime(df['date'])
-    df['count'] = 1
-
-    daily_counts = df.groupby(df['date'].dt.date).count()
-
-    plt.figure(figsize=(8, 5))
-    plt.plot(daily_counts.index, daily_counts['count'], marker='o')
-    plt.title("User Registrations Over Time")
-    plt.xlabel("Date")
-    plt.ylabel("Registrations")
-    plt.grid(True)
-
-    buffer = BytesIO()
-    plt.savefig(buffer, format='png')
-    buffer.seek(0)
-    image_png = buffer.getvalue()
-    buffer.close()
-    graphic = base64.b64encode(image_png).decode('utf-8')
-
-    return render_template("visualize.html", graphic=graphic)
+    Returns:
+        Response: Flask response object.
+    """
+    pass
 
 
-# ------------------ GET USERNAME ------------------
 @views.route('/get_name')
 def get_name():
-    data = {'name': session["user"]["username"] if "user" in session else ''}
+    """
+    :return: json object with username
+    """
+    data = {'name': ''}
+    if 'username' in session:
+        data = {'name': session['username']}
+
     return jsonify(data)
 
 
-# ------------------ GET MESSAGES ------------------
 @views.route('/get_messages')
 def get_messages():
-    room_id = request.args.get("room_id")
-    if not room_id:
-        return jsonify({"error": "Room ID not provided"}), 400
-
-    message = Message.query.filter_by(room_id=room_id).first()
-    if not message:
-        return jsonify({"messages": []})
-
-    messages = [{
-        "content": msg.content,
-        "timestamp": msg.timestamp.strftime('%Y-%m-%d %H:%M:%S'),
-        "sender_id": msg.sender_id,
-        "sender_username": msg.sender_username
-    } for msg in message.messages]
-
-    return jsonify({"messages": messages})
+    """
+    query the database for messages o in a particular room id
+    :return: all messages
+    """
+    pass
 
 
-# ------------------ LOGOUT / LEAVE ------------------
 @views.route('/leave')
 def leave():
-    session.clear()
-    return redirect(url_for('views.login'))
+    """
+    Emits a 'disconnect' event and redirects to the home page.
+
+    Returns:
+        Response: Flask response object.
+    """
+    socket.emit('disconnect')
+    return redirect(url_for('views.home'))

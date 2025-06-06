@@ -1,5 +1,6 @@
 Flask~=2.2.2
 flask-socketio
+eventlet
 flask-cors
 sqlalchemy
 flask-sqlalchemy
@@ -7,3 +8,4 @@ flask_login
 pandas
 matplotlib
 passlib
+python-dotenv
